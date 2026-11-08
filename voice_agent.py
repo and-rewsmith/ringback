@@ -43,9 +43,15 @@ SIP_PASS = os.environ.get("VOICE_SIP_PASS", "")
 SIP_PROXY = os.environ.get("VOICE_SIP_PROXY", "sip:sip.linphone.org;transport=tls")
 # Caller-ID display name shown on the phone (the SIP From header display name).
 SIP_DISPLAY_NAME = os.environ.get("VOICE_DISPLAY_NAME", "").strip()
+def _resolve_path(s: str) -> str:
+    # expand $HOME / ${HOME} / ~ that arrive UNEXPANDED via env (subprocess gets no shell,
+    # so a literal "$HOME/..." would never resolve -> whisper fails to load the model -> silence).
+    return os.path.expanduser(os.path.expandvars(s)) if s else s
+
+
 WHISPER_BIN = os.environ.get("WHISPER_BIN", "whisper-cli")
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL",
-                               os.path.expanduser("~/.whisper-models/ggml-small.en.bin"))
+WHISPER_MODEL = _resolve_path(os.environ.get("WHISPER_MODEL",
+                                             os.path.expanduser("~/.whisper-models/ggml-small.en.bin")))
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
 # Voice-activity thresholds. Background noise was falsely triggering barge-in, so
@@ -92,6 +98,10 @@ POST_SPEAK_DRAIN = float(os.environ.get("VOICE_POST_SPEAK_DRAIN", "0.35"))  # le
 #     this is the responsive "stop after ~1.5s of no new words" endpoint.
 START_TIMEOUT = float(os.environ.get("VOICE_START_TIMEOUT", "4.0"))
 END_SILENCE = float(os.environ.get("VOICE_END_SILENCE", "1.5"))
+# Hard ceiling on a single capture turn (a safety stop if the user never pauses). The
+# normal end is END_SILENCE after the last word; this only fires for nonstop speech.
+# Hardcoded 15s previously cut off long monologues — now overridable via VOICE_MAX_TURN_SEC.
+MAX_TURN_SEC = float(os.environ.get("VOICE_MAX_TURN_SEC", "15.0"))
 # End-of-turn is detected on AUDIO ENERGY, not whisper text: the user is "still talking"
 # while the near-end tail RMS is above this OR new words keep appearing. Keying purely off
 # the transcript hung for ~15s on real phone audio (whisper re-words the same clip every
@@ -107,8 +117,8 @@ NO_SPEECH_SEC = float(os.environ.get("VOICE_NO_SPEECH_SEC", str(START_TIMEOUT)))
 # first transcription of a call; reaped after WHISPER_SERVER_IDLE_SEC idle to free memory.
 # Falls back to whisper-cli if it can't start.
 WHISPER_SERVER_BIN = os.environ.get("WHISPER_SERVER_BIN", "whisper-server")
-WHISPER_SERVER_MODEL = os.environ.get("WHISPER_SERVER_MODEL",
-                                      os.path.expanduser("~/.whisper-models/ggml-base.en.bin"))
+WHISPER_SERVER_MODEL = _resolve_path(os.environ.get("WHISPER_SERVER_MODEL",
+                                                    os.path.expanduser("~/.whisper-models/ggml-base.en.bin")))
 WHISPER_SERVER_HOST = os.environ.get("WHISPER_SERVER_HOST", "127.0.0.1")
 WHISPER_SERVER_PORT = int(os.environ.get("WHISPER_SERVER_PORT", "8642"))
 WHISPER_SERVER_IDLE_SEC = float(os.environ.get("WHISPER_SERVER_IDLE_SEC", "300"))  # GC after 5 min idle
@@ -628,7 +638,7 @@ class CallSession:
         _rm(wav)
         return "ended" if self.disconnected else "spoke"
 
-    def listen(self, max_sec: float = 15.0, end_silence: float = END_SILENCE,
+    def listen(self, max_sec: float = MAX_TURN_SEC, end_silence: float = END_SILENCE,
                start_timeout: float = START_TIMEOUT) -> str:
         """Capture one user turn, STREAMED through the persistent whisper-server. Records
         and transcribes the growing clip ~3x/sec; the turn-end logic lives in the pure,
@@ -664,7 +674,7 @@ class CallSession:
         return final or text
 
     def speak_interruptible(self, text: str, listen_after: bool = True,
-                            silence_sec: float = 1.0, max_wait: float = 15.0,
+                            silence_sec: float = 1.0, max_wait: float = MAX_TURN_SEC,
                             barge_rms: float = BARGE_RMS_BASE) -> dict:
         """Speak `text` while monitoring for the user talking over us (barge-in).
 

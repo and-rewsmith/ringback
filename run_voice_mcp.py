@@ -54,7 +54,16 @@ def _load_env_file(path: str) -> None:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
-            val = val.strip().strip('"').strip("'")
+            val = val.strip()
+            # Quoted value: take the content between the opening quote and its
+            # matching close, ignoring anything after (e.g. an inline comment).
+            if val[:1] in ('"', "'"):
+                q = val[0]
+                end = val.find(q, 1)
+                val = val[1:end] if end != -1 else val[1:]
+            # Unquoted value: strip an inline ` # ...` comment.
+            elif " #" in val:
+                val = val.split(" #", 1)[0].strip()
             if key:
                 os.environ[key] = val
 
